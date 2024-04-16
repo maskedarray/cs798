@@ -1,0 +1,14 @@
+SingleAddr 4 23431.25
+MultipleAddr 4 85894.75
+SingleAddr 8 50888.75
+MultipleAddr 8 386428.12
+SingleAddr 12 67264.92
+MultipleAddr 12 848145.75
+SingleAddr 16 Invalid
+MultipleAddr 16 1401711.31
+SingleAddr 20 130005.90
+MultipleAddr 20 2760482.90
+SingleAddr 24 148158.79
+MultipleAddr 24 3448443.79
+SingleAddr 28 136632.43
+MultipleAddr 28 4127639.93
