@@ -5,15 +5,7 @@
 #include "tle.h"
 using namespace std;
 
-#define MAX_RETRIES 40
-
-struct nodeA {
-    char padding0[PADDING_BYTES];
-    uint32_t key;
-    // mutex m;
-    char padding1[PADDING_BYTES];
-};
-
+// #define ___USE_OPENMP___
 
 class TLEHashTableExpand {
 private:
@@ -25,19 +17,25 @@ private:
     char padding0[PADDING_BYTES];
     ElapsedTimer debugTimer;                // just for debugging
     int numThreads;
+    #ifndef ___USE_OPENMP___
     volatile int * data;
+    char padding2[PADDING_BYTES];
     volatile int * old;
+    #else
+    atomic<int> * data;
+    char padding2[PADDING_BYTES];
+    atomic<int> * old;
+    #endif
     int64_t capacity;
     int64_t oldCapacity;
     counter * approxInserts;                // only create ONCE in the constructor, then use set() to reset its value if needed
+    char padding3[PADDING_BYTES];
     counter * approxDeletes;                // only create ONCE in the constructor, then use set() to reset its value if needed
     char padding1[PADDING_BYTES];
-    TryLock lock;
-    atomic<bool> isExpanding;
 
-    bool isExpandNeeded(const int tid, int64_t probeCount);
-    void expand(const int tid, TLEGuard *g);
-    int64_t getAccurateSize();
+    inline bool isExpandNeeded(const int tid, int64_t probeCount, int* new_capacity);
+    inline void expand(const int tid, TLEGuard *g, int* new_capacity);
+    inline int64_t getAccurateSize();
 
 public:
     TLEHashTableExpand(const int _numThreads, const int64_t _capacity);
@@ -48,154 +46,198 @@ public:
     void printDebuggingDetails();
 
 private:
-    bool insertIfAbsentSequential(const int tid, const int & key, TLEGuard *g, bool disableExpansion);
-    bool eraseSequential(const int tid, const int & key, TLEGuard *g);
+    inline bool insertIfAbsentSequential(const int tid, const int & key, TLEGuard *g, bool disableExpansion);
+    inline bool insertIfAbsentCAS(const int tid, const int & key, TLEGuard *g, bool disableExpansion);
+    inline bool eraseSequential(const int tid, const int & key,TLEGuard *g);
 };
 
 // _capacity is the INITIAL size of the hash table (maximum number of elements it can contain WITHOUT expansion)
 TLEHashTableExpand::TLEHashTableExpand(const int _numThreads, const int64_t _capacity) {
     numThreads = _numThreads;
     capacity = _capacity;
-    data = new volatile int[capacity];
+    #ifndef ___USE_OPENMP___
+    data = new int[capacity];
+    #else
+    data = new atomic<int>[capacity];
+    #endif
     for (int64_t i=0;i<capacity;++i) data[i] = EMPTY;
     approxInserts = new counter(numThreads);
     approxDeletes = new counter(numThreads);
     old = NULL;
     oldCapacity = 0;
     debugTimer.startTimer();
-    isExpanding.store(0);
 }
 
 TLEHashTableExpand::~TLEHashTableExpand() {
     delete[] data;
-    delete[] old;
+    // delete[] old;
     delete approxInserts;
     delete approxDeletes;
 }
 
-int64_t TLEHashTableExpand::getAccurateSize() {
+inline int64_t TLEHashTableExpand::getAccurateSize() {
     int64_t accurateInserts = approxInserts->getAccurate();
     int64_t accurateDeletes = approxDeletes->getAccurate();
     return accurateInserts - accurateDeletes;
 }
 
-bool TLEHashTableExpand::isExpandNeeded(const int tid, int64_t probeCount) {
-    return ((approxInserts->get() > capacity/3) ||
-            (probeCount > 100 && approxInserts->getAccurate() > capacity/3));
+inline bool TLEHashTableExpand::isExpandNeeded(const int tid, int64_t probeCount, int *new_capacity) {
+    if ((approxInserts->get() > capacity/3)){
+        *new_capacity = abs(capacity - approxDeletes->getAccurate())*2;
+        return true;
+    } else if (probeCount > 500){
+        *new_capacity = capacity;
+    }
+    else if (probeCount > 100 && approxInserts->getAccurate() > capacity/3) {
+        *new_capacity = abs(capacity - approxDeletes->getAccurate())*2;
+        return true;
+    } else {
+        return false;
+    }
 }
 
-void TLEHashTableExpand::expand(const int tid, TLEGuard *g) {
+inline void TLEHashTableExpand::expand(const int tid, TLEGuard *g, int *new_capacity) {
     int64_t expansionStartTime = debugTimer.getElapsedMillis();
 
     // EXPANSION CODE HERE :)
-    // g->explicit_fallback();
-    // lock.acquire();
 
     int64_t accurateSize = approxInserts->getAccurate();
     accurateSize = accurateSize - approxDeletes->getAccurate();
 
-    int64_t new_capacity = capacity *2;
+    // int64_t new_capacity = capacity *2;
+    #ifndef ___USE_OPENMP___
     volatile int * new_data;
-    new_data = new int[new_capacity];
-    for(int64_t i=0; i<new_capacity; i++)   new_data[i]=0;
+    new_data = new int[*new_capacity];
+    #else
+    atomic<int> * new_data;
+    new_data = new atomic<int>[*new_capacity];
+    #endif
+    
+    
+    
     old = data;
     data = new_data;
     oldCapacity = capacity;
-    capacity = new_capacity;
+    capacity = *new_capacity;
+
+    #ifndef ___USE_OPENMP___
+    for(int64_t i=0; i<*new_capacity; i++)   new_data[i]=0;
+    #else
+    #pragma omp parallel for num_threads(16) schedule(static)
+    for(int64_t i=0; i<*new_capacity; i++)   new_data[i]=0;
+    #endif
+    
+#ifndef ___USE_OPENMP___
+    for(int64_t i=0; i<oldCapacity; i++){
+        if(old[i] != EMPTY && old[i] != TOMBSTONE){
+            int res = insertIfAbsentSequential(tid, (const int)old[i], g, true);
+            // if(!res)    printf("insert in expand returned false, %d, %d\n", i, old[i]);
+        }
+    }
+#else 
+    #pragma omp parallel for num_threads(16) schedule(static)
+    for(int64_t i=0; i<oldCapacity; i++){
+        if(old[i] != EMPTY && old[i] != TOMBSTONE){
+            int res = insertIfAbsentCAS(tid, (const int)old[i], g, true);
+            // if(!res)    printf("insert in expand returned false\n");
+        }
+    }
+#endif
     approxInserts->set(accurateSize);
     approxDeletes->set(0);
-    
-    for(int64_t i=0; i<oldCapacity; i++){
-            // uint32_t h = murmur3(data[i]); 
-            // for (uint32_t j = 0; j < new_capacity; j++){
-            //     uint32_t index = (h + j) % new_capacity;
-            //     if(new_data[index] == data[i]){
-            //         assert(false);
-            //     }
-            //     else if(new_data[index] == EMPTY){ 
-            //         new_data[index] = data[i];
-            //         break;
-            //     }
-            // }
-            int res = insertIfAbsentSequential(tid, (const int)old[i], g, true);
-            if(!res)    printf("insert in expand returned false\n\n");
-        
-    }
+    delete[] old;
     g->explicit_fallback();
 
-    // lock.release();
-    // suggested adjustment to counters at the end of expansion:
-     
-
-    auto expansionEndTime = debugTimer.getElapsedMillis();
-    printf("tid=%d expansion at_ms=%ld duration_ms=%ld oldCapacity=%ld newCapacity=%ld\n", tid, expansionStartTime, (expansionEndTime - expansionStartTime), oldCapacity, capacity);
+    // auto expansionEndTime = debugTimer.getElapsedMillis();
+    // printf("tid=%d expansion at_ms=%ld duration_ms=%ld oldCapacity=%ld newCapacity=%ld\n", tid, expansionStartTime, (expansionEndTime - expansionStartTime), oldCapacity, capacity);
 }
 
 // semantics: try to insert key. return true if successful (if key doesn't already exist), and false otherwise
 bool TLEHashTableExpand::insertIfAbsent(const int tid, const int & key) {
     bool result;
-    volatile __attribute_used__ TLEGuard g(tid);
+    TLEGuard g(tid);
     result = insertIfAbsentSequential(tid, key, (TLEGuard*)&g, false);
     if(result) approxInserts->inc(tid);
+    g.explicit_commit();
     return result; 
 }
 
 // semantics: try to erase key. return true if successful, and false otherwise
 bool TLEHashTableExpand::erase(const int tid, const int & key) {
     bool result;
-    volatile __attribute_used__ TLEGuard g(tid);
+    TLEGuard g(tid);
     result = eraseSequential(tid, key, (TLEGuard*)&g);
     if(result) approxDeletes->inc(tid);
+    g.explicit_commit();
     return result;
 }
 
 // semantics: try to insert key. return true if successful (if key doesn't already exist), and false otherwise
-bool TLEHashTableExpand::insertIfAbsentSequential(const int tid, const int & key, TLEGuard *g, bool disableExpansion = false) {
-    
+inline bool TLEHashTableExpand::insertIfAbsentSequential(const int tid, const int & key, TLEGuard *g, bool disableExpansion = false) {
     uint32_t h = murmur3(key); 
     for (uint32_t i = 0; i < capacity; i++){
-        if(!disableExpansion) { if(isExpandNeeded(tid, i))  expand(tid, g);}
+        if(!disableExpansion) { 
+            int new_capacity;
+            if(isExpandNeeded(tid, i, &new_capacity))  {
+                expand(tid, g, &new_capacity);
+                return false;
+            }
+        }
         uint32_t index = (h + i) % capacity;
-		// data[index].m.lock(); 
         if(data[index] == key){
-            // data[index].m.unlock();
-            if(!disableExpansion) g->explicit_commit();
             return false;
         }
         else if(data[index] == EMPTY){ 
             data[index] = key;
-            if(!disableExpansion) g->explicit_commit();
-            // data[index].m.unlock();
             return true;
         }
-        // data[index].m.unlock();
     }
     return false;
 }
 
 // semantics: try to erase key. return true if successful, and false otherwise
-bool TLEHashTableExpand::eraseSequential(const int tid, const int & key, TLEGuard *g) {
+inline bool TLEHashTableExpand::eraseSequential(const int tid, const int & key, TLEGuard *g) {
        uint32_t h = murmur3(key); 
     for (uint32_t i = 0; i < capacity; i++){
-        if(isExpandNeeded(tid, i))  expand(tid, g);
+        int new_capacity;
+        if(isExpandNeeded(tid, i, &new_capacity))  {
+            expand(tid, g, &new_capacity);
+            return false;
+        }
         uint32_t index = (h + i) % capacity;
-        // data[index].m.lock(); 
         if(data[index] == EMPTY){ 
-            // data[index].m.unlock();
-            g->explicit_commit();
             return false;
         }
         else if(data[index] == key){
             data[index] = TOMBSTONE;
-            g->explicit_commit();
             return true;
         }
-        
-        // data[index].m.unlock();
     }
     return false;
 }
 
+
+// semantics: try to insert key. return true if successful (if key doesn't already exist), and false otherwise
+inline bool TLEHashTableExpand::insertIfAbsentCAS(const int tid, const int & key, TLEGuard *g, bool disableExpansion = false) {
+    #ifdef ___USE_OPENMP___
+    uint32_t h = murmur3(key); 
+    for (uint32_t i = 0; i < capacity; i++){
+        uint32_t index = (h + i) % capacity;
+        int value = data[index];
+        if(value == key){
+            return false;
+        }
+        else if(value == EMPTY){ 
+            if(data[index].compare_exchange_strong(value, key)){
+                return true;
+            }   else {
+                return insertIfAbsentCAS(tid, key, g);
+            }
+        }
+    }
+    #endif
+    return false;
+}
 
 // semantics: return the sum of all KEYS in the set
 int64_t TLEHashTableExpand::getSumOfKeys() {
