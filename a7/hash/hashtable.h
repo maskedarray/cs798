@@ -145,9 +145,9 @@ inline void TLEHashTableExpand::expand(const int tid, TLEGuard *g, int *new_capa
 #endif
     approxInserts->set(accurateSize);
     approxDeletes->set(0);
-    delete[] old;
+    
     g->explicit_fallback();
-
+    delete[] old;
     // auto expansionEndTime = debugTimer.getElapsedMillis();
     // printf("tid=%d expansion at_ms=%ld duration_ms=%ld oldCapacity=%ld newCapacity=%ld\n", tid, expansionStartTime, (expansionEndTime - expansionStartTime), oldCapacity, capacity);
 }
@@ -157,8 +157,8 @@ bool TLEHashTableExpand::insertIfAbsent(const int tid, const int & key) {
     bool result;
     TLEGuard g(tid);
     result = insertIfAbsentSequential(tid, key, (TLEGuard*)&g, false);
-    if(result) approxInserts->inc(tid);
     g.explicit_commit();
+    if(result) approxInserts->inc(tid);
     return result; 
 }
 
@@ -167,8 +167,8 @@ bool TLEHashTableExpand::erase(const int tid, const int & key) {
     bool result;
     TLEGuard g(tid);
     result = eraseSequential(tid, key, (TLEGuard*)&g);
-    if(result) approxDeletes->inc(tid);
     g.explicit_commit();
+    if(result) approxDeletes->inc(tid);
     return result;
 }
 

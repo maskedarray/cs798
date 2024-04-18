@@ -11,6 +11,9 @@ all: $(PROGRAMS)
 build:
 	mkdir -p $@
 
+benchmark-test: build
+	$(GPP) $(FLAGS) -MMD -MP -MF build/$@.d -o $@ $@.cpp $(LDFLAGS)
+
 benchmark: build
 	$(GPP) $(FLAGS) -MMD -MP -MF build/$@.d -o $@ $@.cpp $(LDFLAGS)
 
